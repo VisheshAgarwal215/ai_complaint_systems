@@ -2,11 +2,12 @@ const ApiError = require('../utils/ApiError');
 
 // Primary free model – good at instruction-following & JSON output
 const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-4-scout:free';
-// Fallback model if primary fails / hangs
-const FALLBACK_MODEL = 'google/gemma-3-12b-it:free';
+// Fallback model if primary fails / hangs (use same known-supported model to avoid unsupported endpoints)
+const FALLBACK_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-4-scout:free';
 
 const AI_TIMEOUT_MS = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 60000;
 const VALID_PRIORITIES = ['Low', 'Medium', 'High'];
+
 
 const buildSystemPrompt = () => `You are an expert municipal complaint triage assistant.
 
