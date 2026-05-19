@@ -1,7 +1,28 @@
 import axios from 'axios';
 
+// Get base URL smartly
+const getBaseUrl = () => {
+  // In local development, use empty string to let Vite proxy handle it
+  if (import.meta.env.DEV) {
+    return '';
+  }
+  
+  // In production, use environment variable or fallback
+  let url = import.meta.env.VITE_API_URL || 'https://ai-complaint-systems.onrender.com';
+  
+  // Remove trailing slashes
+  url = url.replace(/\/+$/, '');
+  
+  // Remove /api if accidentally included in env var
+  if (url.endsWith('/api')) {
+    url = url.slice(0, -4);
+  }
+  
+  return url;
+};
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'https://ai-complaint-systems.onrender.com',
+  baseURL: getBaseUrl(),
   headers: { 'Content-Type': 'application/json' },
   timeout: 30000,
 });
