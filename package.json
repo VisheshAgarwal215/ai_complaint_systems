@@ -1,0 +1,9 @@
+{
+  "name": "smart-complaint-management",
+  "private": true,
+  "scripts": {
+    "start": "npm start --prefix backend",
+    "dev": "npm run dev --prefix backend",
+    "install:backend": "npm install --prefix backend"
+  }
+}
