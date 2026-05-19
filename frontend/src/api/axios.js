@@ -6,18 +6,23 @@ const getBaseUrl = () => {
   if (import.meta.env.DEV) {
     return '';
   }
-  
-  // In production, use environment variable or fallback
-  let url = import.meta.env.VITE_API_URL || 'https://ai-complaint-systems.onrender.com';
-  
+
+  // In production, prefer explicit backend URL via env var.
+  // If no VITE_API_URL is set, use relative /api paths so the frontend can still work if served from the same origin.
+  let url = import.meta.env.VITE_API_URL || '';
+
+  if (!url) {
+    return '';
+  }
+
   // Remove trailing slashes
-  url = url.replace(/\/+$/, '');
-  
+  url = url.replace(/\/+$|$/, '');
+
   // Remove /api if accidentally included in env var
   if (url.endsWith('/api')) {
     url = url.slice(0, -4);
   }
-  
+
   return url;
 };
 
@@ -29,6 +34,7 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
+  config.headers = config.headers || {};
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
