@@ -24,8 +24,12 @@ const corsOptions = {
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: false,
+  optionsSuccessStatus: 204,
 };
 
+// Explicitly handle OPTIONS preflight requests for ALL routes
+// This MUST come before any route definitions
+app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
 
 app.use(express.json());
