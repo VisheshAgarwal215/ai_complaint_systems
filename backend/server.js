@@ -11,6 +11,12 @@ const startServer = async () => {
       throw new Error('JWT_SECRET is not defined in environment variables');
     }
 
+    if (!process.env.OPENROUTER_API_KEY) {
+      console.warn(
+        'Warning: OPENROUTER_API_KEY is not set. POST /api/ai/analyze will be unavailable.'
+      );
+    }
+
     await connectDB();
 
     const server = app.listen(PORT, () => {
