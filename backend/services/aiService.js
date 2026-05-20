@@ -1,13 +1,35 @@
 const ApiError = require('../utils/ApiError');
 
-// Primary free model – good at instruction-following & JSON output
-const PRIMARY_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-4-scout:free';
-// Fallback model if primary fails / hangs (use same known-supported model to avoid unsupported endpoints)
-const FALLBACK_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-4-scout:free';
-
+// Timeout configuration
 const AI_TIMEOUT_MS = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 60000;
 const VALID_PRIORITIES = ['Low', 'Medium', 'High'];
 
+/**
+ * Returns a list of candidate models to try in order.
+ * This list is designed to bypass known broken/invalid model configurations and fall back dynamically.
+ */
+const getModelCandidates = () => {
+  const models = [];
+
+  // 1. User-configured model from environment (if valid and not known-broken)
+  if (process.env.OPENROUTER_MODEL) {
+    const envModel = process.env.OPENROUTER_MODEL.trim();
+    if (envModel && envModel !== 'meta-llama/llama-4-scout:free') {
+      models.push(envModel);
+    }
+  }
+
+  // 2. OpenRouter free model router (highly reliable dynamic free model selector)
+  models.push('openrouter/free');
+
+  // 3. Specific stable free models if the router has issues
+  models.push('meta-llama/llama-3.3-70b-instruct:free');
+  models.push('google/gemma-4-31b-it:free');
+  models.push('meta-llama/llama-3.2-3b-instruct:free');
+
+  // Remove any duplicates
+  return Array.from(new Set(models));
+};
 
 const buildSystemPrompt = () => `You are an expert municipal complaint triage assistant.
 
@@ -27,16 +49,25 @@ Respond with ONLY the JSON object. No other text.`;
 
 const parseAnalysisJson = (rawContent) => {
   // Strip markdown fences and extra whitespace
-  const cleaned = rawContent
-    .trim()
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '');
+  let cleaned = rawContent.trim();
+
+  // Find first '{' and last '}' to extract JSON block in case model outputs text outside code blocks
+  const startIdx = cleaned.indexOf('{');
+  const endIdx = cleaned.lastIndexOf('}');
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    cleaned = cleaned.substring(startIdx, endIdx + 1);
+  } else {
+    cleaned = cleaned
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+  }
 
   const parsed = JSON.parse(cleaned);
   const { priority, department, summary, autoResponse } = parsed;
 
-  if (!VALID_PRIORITIES.includes(priority)) {
+  if (!priority || !VALID_PRIORITIES.includes(priority)) {
     throw new ApiError(502, 'AI response missing or invalid priority field');
   }
   if (!department?.trim() || !summary?.trim() || !autoResponse?.trim()) {
@@ -76,7 +107,6 @@ const callOpenRouter = async ({ model, title, description, category, apiKey, bas
         model,
         temperature: 0.3,
         max_tokens: 600,
-        // NOTE: response_format omitted – many free models don't support it
         messages: [
           { role: 'system', content: buildSystemPrompt() },
           {
@@ -91,17 +121,28 @@ const callOpenRouter = async ({ model, title, description, category, apiKey, bas
     const elapsed = Date.now() - startTime;
     console.log(`[AI] Response status: ${response.status} (${elapsed}ms)`);
 
-    const data = await response.json();
+    let data;
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      try {
+        data = await response.json();
+      } catch (parseErr) {
+        console.error('[AI] Failed to parse JSON response:', parseErr.message);
+      }
+    } else {
+      const text = await response.text();
+      console.warn('[AI] Non-JSON response received (first 200 chars):', text.substring(0, 200));
+    }
 
     if (!response.ok) {
-      console.error(`[AI] Error from ${model}:`, JSON.stringify(data?.error || data));
+      console.error(`[AI] Error from ${model}:`, JSON.stringify(data?.error || data || 'Unknown Error'));
       if (response.status === 401 || response.status === 403) {
-        throw new ApiError(502, 'AI authentication failed. Check OPENROUTER_API_KEY.');
+        throw new ApiError(401, 'AI authentication failed. Check OPENROUTER_API_KEY.');
       }
       if (response.status === 429) {
-        throw new ApiError(503, 'AI rate limit exceeded. Try again later.');
+        throw new ApiError(429, 'AI rate limit exceeded. Try again later.');
       }
-      throw new ApiError(502, data?.error?.message || 'AI service request failed');
+      throw new ApiError(502, data?.error?.message || `AI service request failed with status ${response.status}`);
     }
 
     const content = data?.choices?.[0]?.message?.content;
@@ -126,38 +167,38 @@ const analyzeComplaint = async ({ title, description, category }) => {
   }
 
   const opts = { title, description, category, apiKey, baseURL };
+  const models = getModelCandidates();
+  console.log(`[AI] Candidate models to try: ${models.join(', ')}`);
 
-  // Try primary model first
-  try {
-    return await callOpenRouter({ ...opts, model: PRIMARY_MODEL, timeoutMs: AI_TIMEOUT_MS });
-  } catch (primaryError) {
-    // If it's a client-side config error, don't bother retrying with fallback
-    if (primaryError instanceof ApiError && [401, 403, 503].includes(primaryError.statusCode)) {
-      throw primaryError;
-    }
+  let lastError = null;
 
-    console.warn(`[AI] Primary model (${PRIMARY_MODEL}) failed: ${primaryError.message}`);
-    console.log(`[AI] Trying fallback model: ${FALLBACK_MODEL}`);
-
-    // Try fallback model
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
     try {
-      return await callOpenRouter({ ...opts, model: FALLBACK_MODEL, timeoutMs: AI_TIMEOUT_MS });
-    } catch (fallbackError) {
-      console.error(`[AI] Fallback model (${FALLBACK_MODEL}) also failed: ${fallbackError.message}`);
+      return await callOpenRouter({ ...opts, model, timeoutMs: AI_TIMEOUT_MS });
+    } catch (err) {
+      lastError = err;
+      console.warn(`[AI] Model ${model} failed: ${err.message}`);
 
-      // Return the most meaningful error
-      if (fallbackError instanceof ApiError) throw fallbackError;
-      if (primaryError instanceof ApiError) throw primaryError;
-
-      if (fallbackError.name === 'AbortError' || primaryError.name === 'AbortError') {
-        throw new ApiError(504, 'AI analysis timed out after trying multiple models. Please try again.');
+      // If it is a client-side/auth config issue (unrelated to the model itself), fail early
+      if (err instanceof ApiError && [401, 403, 503].includes(err.statusCode)) {
+        throw err;
       }
-      if (fallbackError instanceof SyntaxError) {
-        throw new ApiError(502, 'AI returned an invalid response format');
-      }
-      throw new ApiError(502, fallbackError.message || 'Failed to analyze complaint');
     }
   }
+
+  // If we exhausted all models, handle the final error
+  console.error('[AI] All candidate models failed to analyze complaint.');
+  if (lastError instanceof ApiError) {
+    throw lastError;
+  }
+  if (lastError && lastError.name === 'AbortError') {
+    throw new ApiError(504, 'AI analysis timed out. Please try again.');
+  }
+  if (lastError instanceof SyntaxError) {
+    throw new ApiError(502, 'AI returned an invalid response format');
+  }
+  throw new ApiError(502, lastError?.message || 'Failed to analyze complaint with AI');
 };
 
 module.exports = { analyzeComplaint };
